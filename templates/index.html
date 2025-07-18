@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D FPS Game</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Arial', sans-serif;
+        }
+
+        body {
+            width: 100vw;
+            height: 100vh;
+            overflow: hidden;
+            background-color: black;
+            color: white;
+        }
+
+        #game-container {
+            width: 100%;
+            height: 100%;
+            position: relative;
+            display: none;
+        }
+
+        #crosshair {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        #crosshair::before,
+        #crosshair::after {
+            content: '';
+            position: absolute;
+            background-color: white;
+        }
+
+        #crosshair::before {
+            width: 2px;
+            height: 20px;
+            left: 9px;
+            top: -10px;
+        }
+
+        #crosshair::after {
+            width: 20px;
+            height: 2px;
+            left: 0;
+            top: -1px;
+        }
+
+        #health-display {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            background-color: rgba(0, 0, 0, 0.7);
+            padding: 10px 20px;
+            border-radius: 5px;
+            font-size: 18px;
+            z-index: 10;
+        }
+
+        #nickname-container {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background-color: rgba(0, 0, 0, 0.8);
+            padding: 2rem;
+            border-radius: 10px;
+            text-align: center;
+            max-width: 400px;
+            width: 90%;
+            z-index: 100;
+        }
+
+        #nickname-form input {
+            width: 100%;
+            padding: 0.5rem;
+            margin: 1rem 0;
+            font-size: 1rem;
+            background-color: #333;
+            border: 1px solid #555;
+            color: white;
+            border-radius: 4px;
+        }
+
+        #nickname-form button {
+            width: 100%;
+            padding: 0.75rem;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 1rem;
+        }
+
+        #nickname-form button:hover {
+            background-color: #45a049;
+        }
+
+        #error-message {
+            color: #ff4444;
+            margin-top: 0.5rem;
+            font-size: 0.9rem;
+        }
+
+        .controls-info {
+            margin-top: 1rem;
+            color: #888;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <div id="nickname-container">
+        <h1>Enter Your Nickname</h1>
+        <form id="nickname-form">
+            <input type="text" id="nickname-input" maxlength="15" placeholder="Your Nickname">
+            <div id="error-message"></div>
+            <button type="submit">Start Game</button>
+        </form>
+        <div class="controls-info">
+            <p>Move: W,A,S,D</p>
+            <p>Look: Mouse</p>
+            <p>Shoot: Left Click</p>
+            <p>Jump: Space</p>
+        </div>
+    </div>
+
+    <div id="game-container">
+        <div id="crosshair"></div>
+        <div id="health-display">Health: <span id="health-value">100</span></div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // Game state
+        let socket;
+        let scene, camera, renderer;
+        let playerContainer;
+        let gunMesh, muzzleFlashMesh;
+        let collidableObjects = [];
+        let players = {};
+        let localPlayerId;
+        let clock;
+        let health = 100;
+
+        // Movement controls
+        const keys = {};
+        let moveForward = false;
+        let moveBackward = false;
+        let moveLeft = false;
+        let moveRight = false;
+        let isJumping = false;
+        let verticalVelocity = 0;
+        let isGrounded = true;
+
+        // Constants
+        const PLAYER_HEIGHT = 1.8;
+        const PLAYER_HALF_WIDTH = 0.5;
+        const PLAYER_HALF_HEIGHT = PLAYER_HEIGHT / 2;
+        const PLAYER_HALF_DEPTH = 0.5;
+        const MAP_HALF_SIZE = 45;
+        const PLAYER_START_Y = PLAYER_HALF_HEIGHT;
+        const GRAVITY = 9.8 * 2;
+        const JUMP_POWER = 8;
+        const BASE_MOVEMENT_SPEED = 5;
+
+        // Gun constants
+        const GUN_DEFAULT_POS = new THREE.Vector3(0.5, -0.3, -0.8);
+        const GUN_MODEL_LENGTH = 0.5;
+        const GUN_RETRACT_MAX_AMOUNT = 0.5;
+        const MUZZLE_FLASH_DURATION = 0.1;
+        let muzzleFlashTimer = 0;
+
+        // Start game when nickname is submitted
+        document.getElementById('nickname-form').addEventListener('submit', (e) => {
+            e.preventDefault();
+            const nicknameInput = document.getElementById('nickname-input');
+            const nickname = nicknameInput.value.trim();
+            const errorMessage = document.getElementById('error-message');
+
+            if (nickname.length < 3 || nickname.length > 15) {
+                errorMessage.textContent = 'Nickname must be between 3 and 15 characters.';
+                return;
+            }
+
+            startGame(nickname);
+        });
+
+        function startGame(nickname) {
+            // Hide nickname form and show game
+            document.getElementById('nickname-container').style.display = 'none';
+            document.getElementById('game-container').style.display = 'block';
+
+            // Initialize Three.js scene
+            initScene();
+
+            // Setup Socket.IO connection
+            socket = io();
+
+            // Socket event handlers
+            setupSocketHandlers(nickname);
+
+            // Start animation loop
+            animate();
+        }
+
+        function initScene() {
+            // Scene setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87ceeb); // Sky blue background
+
+            // Camera setup
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+            // Player container setup
+            playerContainer = new THREE.Object3D();
+            playerContainer.position.y = PLAYER_START_Y;
+            scene.add(playerContainer);
+            playerContainer.add(camera);
+
+            // Add gun
+            const gunGeometry = new THREE.BoxGeometry(0.1, 0.1, GUN_MODEL_LENGTH);
+            const gunMaterial = new THREE.MeshStandardMaterial({ color: 0x555555 });
+            gunMesh = new THREE.Mesh(gunGeometry, gunMaterial);
+            gunMesh.position.copy(GUN_DEFAULT_POS);
+            camera.add(gunMesh);
+
+            // Add muzzle flash
+            const muzzleFlashGeometry = new THREE.ConeGeometry(0.05, 0.2, 8);
+            const muzzleFlashMaterial = new THREE.MeshBasicMaterial({ 
+                color: 0xffff00, 
+                transparent: true, 
+                opacity: 0.8 
+            });
+            muzzleFlashMesh = new THREE.Mesh(muzzleFlashGeometry, muzzleFlashMaterial);
+            muzzleFlashMesh.position.set(0, 0, -GUN_MODEL_LENGTH / 2);
+            muzzleFlashMesh.rotation.x = Math.PI / 2;
+            muzzleFlashMesh.scale.set(0.01, 0.01, 0.01);
+            muzzleFlashMesh.visible = false;
+            gunMesh.add(muzzleFlashMesh);
+
+            // Renderer setup
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            document.getElementById('game-container').appendChild(renderer.domElement);
+
+            // Lighting
+            const light = new THREE.DirectionalLight(0xffffff, 1);
+            light.position.set(10, 10, 10);
+            scene.add(light);
+
+            const ambientLight = new THREE.AmbientLight(0x404040);
+            scene.add(ambientLight);
+
+            // Add floor
+            const floor = new THREE.Mesh(
+                new THREE.PlaneGeometry(100, 100),
+                new THREE.MeshStandardMaterial({ color: 0x444444 })
+            );
+            floor.rotation.x = -Math.PI / 2;
+            scene.add(floor);
+            collidableObjects.push(floor);
+
+            // Add environment
+            createEnvironment();
+
+            // Clock for consistent movement speed
+            clock = new THREE.Clock();
+
+            // Event listeners
+            window.addEventListener('resize', onWindowResize, false);
+            setupControls();
+        }
+
+        function createEnvironment() {
+            const wallMaterial = new THREE.MeshStandardMaterial({ color: 0x666666 });
+            const buildingMaterial = new THREE.MeshStandardMaterial({ color: 0x333333 });
+            const obstacleMaterial = new THREE.MeshStandardMaterial({ color: 0x884400 });
+
+            // Helper function to add collidable mesh
+            function addCollidableMesh(geometry, material, position, rotation = new THREE.Vector3()) {
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.position.copy(position);
+                mesh.rotation.set(rotation.x, rotation.y, rotation.z);
+                scene.add(mesh);
+                collidableObjects.push(mesh);
+                return mesh;
+            }
+
+            // Add walls and obstacles
+            // Boundary walls
+            addCollidableMesh(
+                new THREE.BoxGeometry(1, 5, MAP_HALF_SIZE * 2),
+                wallMaterial,
+                new THREE.Vector3(-MAP_HALF_SIZE, 2.5, 0)
+            );
+            addCollidableMesh(
+                new THREE.BoxGeometry(1, 5, MAP_HALF_SIZE * 2),
+                wallMaterial,
+                new THREE.Vector3(MAP_HALF_SIZE, 2.5, 0)
+            );
+            addCollidableMesh(
+                new THREE.BoxGeometry(MAP_HALF_SIZE * 2, 5, 1),
+                wallMaterial,
+                new THREE.Vector3(0, 2.5, -MAP_HALF_SIZE)
+            );
+            addCollidableMesh(
+                new THREE.BoxGeometry(MAP_HALF_SIZE * 2, 5, 1),
+                wallMaterial,
+                new THREE.Vector3(0, 2.5, MAP_HALF_SIZE)
+            );
+
+            // Add some obstacles
+            addCollidableMesh(
+                new THREE.BoxGeometry(5, 5, 5),
+                buildingMaterial,
+                new THREE.Vector3(10, 2.5, 10)
+            );
+            addCollidableMesh(
+                new THREE.BoxGeometry(4, 3, 4),
+                obstacleMaterial,
+                new THREE.Vector3(-15, 1.5, -15)
+            );
+        }
+
+        function setupSocketHandlers(nickname) {
+            socket.on('init', ({ id, players: serverPlayers }) => {
+                localPlayerId = id;
+                Object.entries(serverPlayers).forEach(([playerId, playerData]) => {
+                    if (playerId !== id) {
+                        createPlayerMesh(playerId, playerData);
+                    }
+                });
+                socket.emit('set-nickname', { nickname });
+            });
+
+            socket.on('new-player', ({ id, data }) => {
+                if (id !== localPlayerId) {
+                    createPlayerMesh(id, data);
+                }
+            });
+
+            socket.on('update-player', ({ id, data }) => {
+                if (players[id] && id !== localPlayerId) {
+                    const playerMesh = players[id].mesh;
+                    playerMesh.position.set(data.x, data.y, data.z);
+                    playerMesh.rotation.y = data.rotY;
+                }
+            });
+
+            socket.on('remove-player', (id) => {
+                if (players[id]) {
+                    scene.remove(players[id].mesh);
+                    delete players[id];
+                }
+                if (id === localPlayerId) {
+                    handleDeath();
+                }
+            });
+
+            socket.on('player-fired', ({ shooterId }) => {
+                if (shooterId !== localPlayerId && players[shooterId]) {
+                    // Visual feedback for shooter
+                    const shooterMesh = players[shooterId].mesh;
+                    const originalColor = shooterMesh.material.color.clone();
+                    shooterMesh.material.color.setHex(0xffa500);
+                    setTimeout(() => {
+                        if (players[shooterId]) {
+                            shooterMesh.material.color.copy(originalColor);
+                        }
+                    }, 100);
+                }
+            });
+        }
+
+        function createPlayerMesh(id, data) {
+            const geometry = new THREE.BoxGeometry(1, PLAYER_HEIGHT, 1);
+            const material = new THREE.MeshStandardMaterial({ color: data.color });
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.position.set(data.x, data.y, data.z);
+            scene.add(mesh);
+            players[id] = { mesh, data };
+        }
+
+        function setupControls() {
+            document.addEventListener('keydown', (e) => {
+                switch(e.code) {
+                    case 'KeyW': moveForward = true; break;
+                    case 'KeyS': moveBackward = true; break;
+                    case 'KeyA': moveLeft = true; break;
+                    case 'KeyD': moveRight = true; break;
+                    case 'Space':
+                        if (isGrounded) {
+                            verticalVelocity = JUMP_POWER;
+                            isGrounded = false;
+                        }
+                        break;
+                }
+            });
+
+            document.addEventListener('keyup', (e) => {
+                switch(e.code) {
+                    case 'KeyW': moveForward = false; break;
+                    case 'KeyS': moveBackward = false; break;
+                    case 'KeyA': moveLeft = false; break;
+                    case 'KeyD': moveRight = false; break;
+                }
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (document.pointerLockElement === document.body) {
+                    playerContainer.rotation.y -= e.movementX * 0.002;
+                    camera.rotation.x = Math.max(
+                        -Math.PI / 2,
+                        Math.min(Math.PI / 2, camera.rotation.x - e.movementY * 0.002)
+                    );
+                }
+            });
+
+            document.addEventListener('click', () => {
+                document.body.requestPointerLock();
+            });
+
+            document.addEventListener('mousedown', handleShoot);
+        }
+
+        function handleShoot(e) {
+            if (e.button === 0 && document.pointerLockElement === document.body) {
+                // Show muzzle flash
+                muzzleFlashMesh.visible = true;
+                muzzleFlashMesh.scale.set(1, 1, 1);
+                muzzleFlashTimer = MUZZLE_FLASH_DURATION;
+
+                // Raycast for hit detection
+                const raycaster = new THREE.Raycaster();
+                raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+
+                // Get meshes of other players
+                const otherPlayerMeshes = Object.entries(players)
+                    .filter(([id]) => id !== localPlayerId)
+                    .map(([, player]) => player.mesh);
+
+                const intersects = raycaster.intersectObjects(otherPlayerMeshes);
+
+                if (intersects.length > 0) {
+                    const hitMesh = intersects[0].object;
+                    const hitPlayerId = Object.keys(players).find(
+                        id => players[id].mesh === hitMesh
+                    );
+                    if (hitPlayerId) {
+                        socket.emit('shoot', { hitPlayerId });
+                    }
+                }
+            }
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const delta = clock.getDelta();
+
+            // Update muzzle flash
+            if (muzzleFlashTimer > 0) {
+                muzzleFlashTimer -= delta;
+                const scale = muzzleFlashTimer / MUZZLE_FLASH_DURATION;
+                muzzleFlashMesh.scale.set(scale, scale, scale);
+                if (muzzleFlashTimer <= 0) {
+                    muzzleFlashMesh.visible = false;
+                }
+            }
+
+            // Handle movement
+            if (localPlayerId) {
+                const speed = BASE_MOVEMENT_SPEED * delta;
+                const currentPos = playerContainer.position.clone();
+
+                // Calculate movement direction
+                const moveDirection = new THREE.Vector3(0, 0, 0);
+                if (moveForward) moveDirection.z -= 1;
+                if (moveBackward) moveDirection.z += 1;
+                if (moveLeft) moveDirection.x -= 1;
+                if (moveRight) moveDirection.x += 1;
+                moveDirection.normalize();
+
+                // Apply player rotation to movement
+                moveDirection.applyQuaternion(playerContainer.quaternion);
+                moveDirection.multiplyScalar(speed);
+
+                // Apply gravity
+                if (!isGrounded) {
+                    verticalVelocity -= GRAVITY * delta;
+                }
+                moveDirection.y = verticalVelocity * delta;
+
+                // Update position
+                playerContainer.position.add(moveDirection);
+
+                // Ground check and collision
+                const raycaster = new THREE.Raycaster(
+                    playerContainer.position.clone(),
+                    new THREE.Vector3(0, -1, 0)
+                );
+                const intersects = raycaster.intersectObjects(collidableObjects);
+
+                if (intersects.length > 0 && intersects[0].distance < PLAYER_HEIGHT) {
+                    playerContainer.position.y = intersects[0].point.y + PLAYER_HEIGHT;
+                    verticalVelocity = 0;
+                    isGrounded = true;
+                }
+
+                // Emit position update
+                socket.emit('move', {
+                    x: playerContainer.position.x,
+                    y: playerContainer.position.y,
+                    z: playerContainer.position.z,
+                    rotY: playerContainer.rotation.y
+                });
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function handleDeath() {
+            document.exitPointerLock();
+            document.getElementById('game-container').style.display = 'none';
+            document.getElementById('nickname-container').style.display = 'block';
+            socket.disconnect();
+            // Reset game state
+            scene = null;
+            camera = null;
+            renderer = null;
+            players = {};
+            localPlayerId = null;
+            health = 100;
+        }
+    </script>
+        // Game state
+        let socket;
+        let localPlayerId;
+        let players = {};
+        let canvas;
+        let ctx;
+        let mouseX = 0;
+        let mouseY = 0;
+        let keys = {};
+        let health = 100;
+
+        // Player movement
+        const PLAYER_SPEED = 5;
+        const PLAYER_SIZE = 30;
+
+        // Start game when nickname is submitted
+        document.getElementById('nickname-form').addEventListener('submit', (e) => {
+            e.preventDefault();
+            const nicknameInput = document.getElementById('nickname-input');
+            const nickname = nicknameInput.value.trim();
+            const errorMessage = document.getElementById('error-message');
+
+            if (nickname.length < 3 || nickname.length > 15) {
+                errorMessage.textContent = 'Nickname must be between 3 and 15 characters.';
+                return;
+            }
+
+            startGame(nickname);
+        });
+
+        function startGame(nickname) {
+            // Hide nickname form and show game
+            document.getElementById('nickname-container').style.display = 'none';
+            document.getElementById('game-container').style.display = 'block';
+
+            // Setup canvas
+            canvas = document.getElementById('game-canvas');
+            ctx = canvas.getContext('2d');
+            resizeCanvas();
+
+            // Setup Socket.IO connection
+            socket = io();
+
+            // Socket event handlers
+            socket.on('init', ({ id, players: serverPlayers }) => {
+                localPlayerId = id;
+                players = serverPlayers;
+                socket.emit('set-nickname', { nickname });
+            });
+
+            socket.on('new-player', ({ id, data }) => {
+                players[id] = data;
+            });
+
+            socket.on('update-player', ({ id, data }) => {
+                if (players[id]) {
+                    players[id] = data;
+                    if (id === localPlayerId) {
+                        updateHealthDisplay(data.health);
+                    }
+                }
+            });
+
+            socket.on('remove-player', (id) => {
+                delete players[id];
+                if (id === localPlayerId) {
+                    handleDeath();
+                }
+            });
+
+            socket.on('player-fired', ({ shooterId }) => {
+                if (shooterId !== localPlayerId) {
+                    // Visual feedback for shots (flash the shooter)
+                    const shooter = players[shooterId];
+                    if (shooter) {
+                        // Flash effect logic here if desired
+                    }
+                }
+            });
+
+            // Setup event listeners
+            window.addEventListener('resize', resizeCanvas);
+            window.addEventListener('mousemove', handleMouseMove);
+            window.addEventListener('mousedown', handleMouseDown);
+            document.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+            document.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+            // Lock pointer on canvas click
+            canvas.addEventListener('click', () => {
+                canvas.requestPointerLock();
+            });
+
+            // Start game loop
+            gameLoop();
+        }
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+
+        function handleMouseMove(e) {
+            if (document.pointerLockElement === canvas) {
+                mouseX += e.movementX;
+                mouseY += e.movementY;
+            }
+        }
+
+        function handleMouseDown(e) {
+            if (e.button === 0 && document.pointerLockElement === canvas) {
+                // Calculate direction based on mouse position
+                const localPlayer = players[localPlayerId];
+                if (!localPlayer) return;
+
+                // Find closest player in line of sight
+                let closestPlayer = null;
+                let closestDistance = Infinity;
+
+                for (const [id, player] of Object.entries(players)) {
+                    if (id === localPlayerId) continue;
+
+                    const dx = player.x - localPlayer.x;
+                    const dy = player.y - localPlayer.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+
+                    // Check if player is in view angle (simplified)
+                    const angle = Math.atan2(dy, dx);
+                    const mouseAngle = Math.atan2(mouseY, mouseX);
+                    const angleDiff = Math.abs(angle - mouseAngle);
+
+                    if (distance < closestDistance && angleDiff < Math.PI / 4) {
+                        closestPlayer = id;
+                        closestDistance = distance;
+                    }
+                }
+
+                if (closestPlayer) {
+                    socket.emit('shoot', { hitPlayerId: closestPlayer });
+                }
+            }
+        }
+
+        function handleDeath() {
+            // Reset game
+            document.exitPointerLock();
+            document.getElementById('game-container').style.display = 'none';
+            document.getElementById('nickname-container').style.display = 'block';
+            socket.disconnect();
+        }
+
+        function updateHealthDisplay(newHealth) {
+            health = newHealth;
+            document.getElementById('health-value').textContent = health;
+        }
+
+        function gameLoop() {
+            // Update local player position based on keyboard input
+            if (localPlayerId && players[localPlayerId]) {
+                const player = players[localPlayerId];
+                let dx = 0;
+                let dy = 0;
+
+                if (keys['w']) dy -= PLAYER_SPEED;
+                if (keys['s']) dy += PLAYER_SPEED;
+                if (keys['a']) dx -= PLAYER_SPEED;
+                if (keys['d']) dx += PLAYER_SPEED;
+
+                // Normalize diagonal movement
+                if (dx !== 0 && dy !== 0) {
+                    dx *= 0.707;
+                    dy *= 0.707;
+                }
+
+                // Update position
+                player.x += dx;
+                player.y += dy;
+
+                // Emit position update if moved
+                if (dx !== 0 || dy !== 0) {
+                    socket.emit('move', { x: player.x, y: player.y });
+                }
+            }
+
+            // Clear canvas
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw all players
+            for (const [id, player] of Object.entries(players)) {
+                // Draw player
+                ctx.fillStyle = player.color;
+                ctx.beginPath();
+                ctx.arc(player.x, player.y, PLAYER_SIZE / 2, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Draw nickname
+                if (player.nickname) {
+                    ctx.fillStyle = 'white';
+                    ctx.font = '14px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(player.nickname, player.x, player.y - PLAYER_SIZE);
+                }
+
+                // Draw health bar
+                const healthBarWidth = PLAYER_SIZE;
+                const healthBarHeight = 4;
+                const healthPercent = player.health / 100;
+
+                ctx.fillStyle = 'red';
+                ctx.fillRect(
+                    player.x - healthBarWidth / 2,
+                    player.y + PLAYER_SIZE / 2 + 5,
+                    healthBarWidth,
+                    healthBarHeight
+                );
+
+                ctx.fillStyle = 'green';
+                ctx.fillRect(
+                    player.x - healthBarWidth / 2,
+                    player.y + PLAYER_SIZE / 2 + 5,
+                    healthBarWidth * healthPercent,
+                    healthBarHeight
+                );
+            }
+
+            requestAnimationFrame(gameLoop);
+        }
+    </script>
+</body>
+</html>
