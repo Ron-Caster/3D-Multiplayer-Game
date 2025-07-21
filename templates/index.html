@@ -146,6 +146,7 @@
         let localPlayerId;
         let clock;
         let health = 100;
+        let obstacles = [];
 
         // Movement controls
         const keys = {};
@@ -168,10 +169,18 @@
         const JUMP_POWER = 8;
         const BASE_MOVEMENT_SPEED = 5;
 
+        // Collision constants
+        const PLAYER_COLLIDER_SIZE = {
+            width: 1,
+            height: PLAYER_HEIGHT,
+            depth: 1
+        };
+
         // Gun constants
-        const GUN_DEFAULT_POS = new THREE.Vector3(0.5, -0.3, -0.8);
-        const GUN_MODEL_LENGTH = 0.5;
-        const GUN_RETRACT_MAX_AMOUNT = 0.5;
+        const GUN_DEFAULT_POS = new THREE.Vector3(0.5, -0.3, -0.8); // Original position relative to camera
+        const GUN_MODEL_LENGTH = 0.5; // Length of the gun model
+        const GUN_RETRACT_MAX_AMOUNT = 0.5; // Maximum amount the gun can be pulled back
+        const GUN_RAY_DISTANCE_FROM_CAMERA = Math.abs(GUN_DEFAULT_POS.z) + GUN_MODEL_LENGTH; // Distance from camera to gun tip
         const MUZZLE_FLASH_DURATION = 0.1;
         let muzzleFlashTimer = 0;
 
@@ -329,8 +338,9 @@
         }
 
         function setupSocketHandlers(nickname) {
-            socket.on('init', ({ id, players: serverPlayers }) => {
+            socket.on('init', ({ id, players: serverPlayers, obstacles: serverObstacles }) => {
                 localPlayerId = id;
+                obstacles = serverObstacles; // Store obstacles
                 Object.entries(serverPlayers).forEach(([playerId, playerData]) => {
                     if (playerId !== id) {
                         createPlayerMesh(playerId, playerData);
@@ -394,6 +404,48 @@
             mesh.position.set(data.x, data.y, data.z);
             scene.add(mesh);
             players[id] = { mesh, data };
+        }
+
+        function checkCollisions(newPosition) {
+            // Check map boundaries
+            if (Math.abs(newPosition.x) > MAP_HALF_SIZE - PLAYER_COLLIDER_SIZE.width/2) {
+                return false;
+            }
+            if (Math.abs(newPosition.z) > MAP_HALF_SIZE - PLAYER_COLLIDER_SIZE.depth/2) {
+                return false;
+            }
+
+            // Check obstacles
+            for (const obstacle of obstacles) {
+                const obstacleMinX = obstacle.x - obstacle.width/2;
+                const obstacleMaxX = obstacle.x + obstacle.width/2;
+                const obstacleMinZ = obstacle.z - obstacle.depth/2;
+                const obstacleMaxZ = obstacle.z + obstacle.depth/2;
+
+                const playerMinX = newPosition.x - PLAYER_COLLIDER_SIZE.width/2;
+                const playerMaxX = newPosition.x + PLAYER_COLLIDER_SIZE.width/2;
+                const playerMinZ = newPosition.z - PLAYER_COLLIDER_SIZE.depth/2;
+                const playerMaxZ = newPosition.z + PLAYER_COLLIDER_SIZE.depth/2;
+
+                // Check if player is within obstacle bounds on X and Z axes
+                if (playerMaxX > obstacleMinX && 
+                    playerMinX < obstacleMaxX && 
+                    playerMaxZ > obstacleMinZ && 
+                    playerMinZ < obstacleMaxZ) {
+                    
+                    // Check vertical overlap (Y axis)
+                    const obstacleMinY = obstacle.y - obstacle.height/2;
+                    const obstacleMaxY = obstacle.y + obstacle.height/2;
+                    const playerMinY = newPosition.y - PLAYER_COLLIDER_SIZE.height/2;
+                    const playerMaxY = newPosition.y + PLAYER_COLLIDER_SIZE.height/2;
+
+                    if (playerMaxY > obstacleMinY && playerMinY < obstacleMaxY) {
+                        return false; // Collision detected
+                    }
+                }
+            }
+
+            return true; // No collision
         }
 
         function setupControls() {
@@ -483,6 +535,37 @@
                 }
             }
 
+            // Handle gun collision and retraction
+            if (localPlayerId) {
+                const raycaster = new THREE.Raycaster();
+                const cameraWorldPosition = new THREE.Vector3();
+                const gunTargetWorldPosition = new THREE.Vector3();
+
+                camera.getWorldPosition(cameraWorldPosition);
+                gunMesh.updateWorldMatrix(true, false);
+                gunMesh.localToWorld(gunTargetWorldPosition.copy(new THREE.Vector3(0, 0, -GUN_MODEL_LENGTH)));
+
+                const directionToGunTip = new THREE.Vector3().subVectors(gunTargetWorldPosition, cameraWorldPosition).normalize();
+                raycaster.set(cameraWorldPosition, directionToGunTip);
+                raycaster.far = cameraWorldPosition.distanceTo(gunTargetWorldPosition);
+
+                const intersects = raycaster.intersectObjects(collidableObjects);
+
+                let currentRetractionAmount = 0;
+
+                if (intersects.length > 0) {
+                    const firstIntersection = intersects[0];
+                    const overlap = raycaster.far - firstIntersection.distance;
+
+                    if (overlap > 0) {
+                        currentRetractionAmount = Math.min(overlap, GUN_RETRACT_MAX_AMOUNT);
+                    }
+                }
+
+                const targetGunLocalZ = GUN_DEFAULT_POS.z + currentRetractionAmount;
+                gunMesh.position.z = THREE.MathUtils.lerp(gunMesh.position.z, targetGunLocalZ, 0.1);
+            }
+
             // Handle movement
             if (localPlayerId) {
                 const speed = BASE_MOVEMENT_SPEED * delta;
@@ -506,8 +589,24 @@
                 }
                 moveDirection.y = verticalVelocity * delta;
 
-                // Update position
-                playerContainer.position.add(moveDirection);
+                // Check collisions for X and Z axes separately
+                const newPositionX = currentPos.clone();
+                newPositionX.x += moveDirection.x;
+                
+                const newPositionZ = currentPos.clone();
+                newPositionZ.z += moveDirection.z;
+
+                // Update position if no collision
+                if (checkCollisions(newPositionX)) {
+                    playerContainer.position.x = newPositionX.x;
+                }
+                
+                if (checkCollisions(newPositionZ)) {
+                    playerContainer.position.z = newPositionZ.z;
+                }
+
+                // Always update Y position (gravity)
+                playerContainer.position.y += moveDirection.y;
 
                 // Ground check and collision
                 const raycaster = new THREE.Raycaster(

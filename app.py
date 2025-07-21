@@ -15,6 +15,12 @@ players = {}
 PLAYER_START_Y = 1.8  # Starting height for players
 MAP_HALF_SIZE = 45  # Map boundaries, matching the React version
 
+# Define obstacles in the game world
+OBSTACLES = [
+    {'x': 10, 'y': 2.5, 'z': 10, 'width': 5, 'height': 5, 'depth': 5},
+    {'x': -15, 'y': 1.5, 'z': -15, 'width': 4, 'height': 3, 'depth': 4}
+]
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -31,8 +37,12 @@ def handle_connect():
         'nickname': '',  # will be set later
         'color': 0x00ff00  # default color (green)
     }
-    # Send initial state to new player
-    emit('init', {'id': request.sid, 'players': players})
+    # Send initial state to new player including obstacles
+    emit('init', {
+        'id': request.sid, 
+        'players': players,
+        'obstacles': OBSTACLES
+    })
 
 @socketio.on('set-nickname')
 def handle_nickname(data):
